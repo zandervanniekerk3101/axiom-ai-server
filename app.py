@@ -1,37 +1,35 @@
 import os
 import logging
+import sys
+import openai # Import openai here to check version
+
+# --- FORCE-PROOF DIAGNOSTIC ---
+# This will print to the logs the moment the server starts.
+# If you don't see these lines, Render is NOT running this code.
+print("🔥 Axiom AI server starting with Python version:", sys.version)
+print("🔥 Detected OpenAI version:", openai.__version__)
+# --- END DIAGNOSTIC ---
+
 from flask import Flask, request, jsonify
 from twilio.twiml.voice_response import VoiceResponse
-import openai # Import the library to check its version
-
-# --- Diagnostic Check ---
-# This will print the installed version of the openai library to the Render logs.
-logging.info(f"--- Running with OpenAI version: {openai.__version__} ---")
-
 from openai import OpenAI
 
-# --- Basic Configuration ---
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# --- OpenAI Client Initialization ---
 try:
-    # Modern, correct way to initialize the client
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     logging.info("OpenAI client initialized successfully.")
 except Exception as e:
     logging.error(f"Failed to initialize OpenAI client: {e}")
     client = None
 
-# --- Main Route for Health Check ---
 @app.route('/')
 def index():
     return "Axiom AI Server is running."
 
-# --- Endpoint for the Android App ---
 @app.route('/ask', methods=['POST'])
 def ask_axiom():
-    """Handles questions from the Android app."""
     data = request.get_json()
     if not data or 'prompt' not in data:
         return jsonify({'error': 'Invalid request. "prompt" is required.'}), 400
@@ -43,7 +41,6 @@ def ask_axiom():
         return jsonify({'error': 'OpenAI client is not initialized on the server.'}), 500
 
     try:
-        # Get response from OpenAI
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -54,21 +51,17 @@ def ask_axiom():
         response_text = completion.choices[0].message.content
         logging.info(f"OpenAI response: {response_text}")
         return jsonify({'response': response_text})
-
     except Exception as e:
         logging.error(f"OpenAI chat failed: {e}", exc_info=True)
         return jsonify({'error': 'Failed to get response from OpenAI'}), 500
 
-# --- Twilio Routes (for phone calls) ---
+# Twilio routes remain the same...
 @app.route("/incoming_call", methods=['POST'])
 def incoming_call():
-    """Handles incoming calls and starts transcription."""
     response = VoiceResponse()
     response.say("Hello, you've reached Axiom. Please state your query after the beep.")
-    # Use the PUBLIC_BASE_URL environment variable for the callback
     public_base_url = os.getenv('PUBLIC_BASE_URL')
     transcribe_callback_url = f"{public_base_url}/handle_transcription"
-    
     response.record(
         transcribe=True,
         transcribe_callback=transcribe_callback_url,
@@ -78,10 +71,8 @@ def incoming_call():
 
 @app.route("/handle_transcription", methods=['POST'])
 def handle_transcription():
-    """Receives the transcription and gets a response from OpenAI."""
     transcription_text = request.form['TranscriptionText']
     logging.info(f"Transcription received: {transcription_text}")
-
     response = VoiceResponse()
     try:
         if not client:
