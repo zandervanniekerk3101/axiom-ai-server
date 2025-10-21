@@ -16,7 +16,8 @@ app = Flask(__name__)
 
 # --- OpenAI Client Initialization ---
 try:
-    client = OpenAI()
+    # Modern, correct way to initialize the client
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     logging.info("OpenAI client initialized successfully.")
 except Exception as e:
     logging.error(f"Failed to initialize OpenAI client: {e}")
@@ -58,15 +59,19 @@ def ask_axiom():
         logging.error(f"OpenAI chat failed: {e}", exc_info=True)
         return jsonify({'error': 'Failed to get response from OpenAI'}), 500
 
-# --- Twilio Routes (for phone calls - not relevant to the current app issue) ---
+# --- Twilio Routes (for phone calls) ---
 @app.route("/incoming_call", methods=['POST'])
 def incoming_call():
     """Handles incoming calls and starts transcription."""
     response = VoiceResponse()
     response.say("Hello, you've reached Axiom. Please state your query after the beep.")
+    # Use the PUBLIC_BASE_URL environment variable for the callback
+    public_base_url = os.getenv('PUBLIC_BASE_URL')
+    transcribe_callback_url = f"{public_base_url}/handle_transcription"
+    
     response.record(
         transcribe=True,
-        transcribe_callback=f"{os.getenv('PUBLIC_BASE_URL')}/handle_transcription",
+        transcribe_callback=transcribe_callback_url,
         play_beep=True
     )
     return str(response)
