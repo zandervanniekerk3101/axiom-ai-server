@@ -17,5 +17,6 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy the rest of your application code into the container
 COPY . /app/
 
-# The command to run your application (Render will automatically use the $PORT variable)
-CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "app:app"]
+# The command to run your application using shell form to ensure $PORT substitution
+CMD gunicorn --bind 0.0.0.0:$PORT app:app
+
