@@ -241,7 +241,7 @@ def oauth2callback():
         return "Authorization failed: State mismatch.", 400
 
     try:
-        flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+        flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file( # Use Flow for web apps
             CLIENT_SECRETS_FILE, SCOPES, state=state)
 
         render_url = os.environ.get("PUBLIC_BASE_URL")
