@@ -154,6 +154,7 @@ if not openai_api_key:
     logger.error("OPENAI_API_KEY environment variable not found.")
     openai_client = None
 else:
+    # THIS BLOCK IS NOW CORRECTLY INDENTED
     try:
         # THIS IS THE FIX: No 'proxies' argument
         openai_client = OpenAI(api_key=openai_api_key)
