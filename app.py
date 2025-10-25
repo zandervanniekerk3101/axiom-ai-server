@@ -38,6 +38,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "a_very_strong_development_s
 
 
 # --- Google API Setup ---
+# FIX: Added 'openid', 'email', and 'profile' scopes to match the Android app's request
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.readonly',
@@ -45,7 +46,10 @@ SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/presentations',
     'https://www.googleapis.com/auth/calendar.events',
-    'https://www.googleapis.com/auth/forms.body'
+    'https://www.googleapis.com/auth/forms.body',
+    'openid',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile'
 ]
 # Use a persistent storage path if available (Render offers /var/data)
 # For simplicity, we'll stick to the local directory, which works with Docker's file system.
@@ -530,4 +534,5 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     # os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1' # Keep commented out for Render/production
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
