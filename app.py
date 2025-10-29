@@ -1,5 +1,5 @@
 import os
-import logging # <-- ADD THIS LINE
+import logging # <-- Ensure this import is present
 import sys
 import pickle
 import base64
@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify, redirect, session, url_for
 from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client as TwilioClient
 from openai import OpenAI
-from elevenlabs import Voice, VoiceSettings
+from elevenlabs import Voice, VoiceSettings # <-- Keep Voice, VoiceSettings
 from elevenlabs.client import ElevenLabs
 import google.oauth2.credentials
 import google_auth_oauthlib.flow
@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-logger.info("✅ Flask app object created.")
+logger.info("✅ Flask app object created.") # <-- Added Log
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev_secret_key_replace_me")
 
 # --- Google API Setup ---
@@ -161,7 +161,7 @@ else:
 # --- End Twilio Setup ---
 
 
-logger.info("🏁 Registering Flask routes...")
+logger.info("🏁 Registering Flask routes...") # <-- Added Log
 @app.route('/')
 def home():
     auth_status = "Google API Authorized" if google_creds and google_creds.valid else "Google API NOT Authorized (Visit /authorize_google)"
@@ -321,7 +321,7 @@ def ask_axiom():
 # --- END OF UPDATED ROUTE ---
 
 
-# --- UPDATED audio generation function ---
+# --- FINAL REVISED audio generation function ---
 def generate_audio_base64(text: str) -> str | None:
     """Helper function to generate audio and return it as a Base64 string."""
     if not elevenlabs_client:
@@ -330,20 +330,37 @@ def generate_audio_base64(text: str) -> str | None:
     try:
         logger.info(f"Generating audio for text: '{text[:30]}...'")
 
-        # --- CORRECTED ElevenLabs API call ---
-        # Use client.generate directly
-        audio_bytes_iterator = elevenlabs_client.generate(
+        # --- CORRECTED ElevenLabs API call (Attempt 3) ---
+        # Use the standard client.text_to_speech.convert method
+        audio_result = elevenlabs_client.text_to_speech.convert(
+            voice_id=elevenlabs_voice_id,
+            optimize_streaming_latency="0", # Optional: Adjust latency optimization
+            output_format="mp3_44100_128",  # Standard MP3 format
             text=text,
-            voice=Voice(
-                voice_id=elevenlabs_voice_id,
-                settings=VoiceSettings(stability=0.7, similarity_boost=0.75)
-            ),
-            model="eleven_multilingual_v2"
+            model_id="eleven_multilingual_v2", # Specify the model if needed
+             voice_settings=VoiceSettings(
+                 stability=0.7,
+                 similarity_boost=0.75,
+                 style=0.0, # Optional: Adjust style exaggeration
+                 use_speaker_boost=True
+             )
         )
-
-        # The generate function returns an iterator of chunks. We need to concatenate them.
-        audio_bytes = b"".join(chunk for chunk in audio_bytes_iterator)
         # --- End Correction ---
+
+        # The convert method should directly return audio bytes if successful,
+        # but documentation suggests it might also return an iterator.
+        # Let's handle both possibilities.
+        audio_bytes = b""
+        if hasattr(audio_result, '__iter__'):
+             logger.info("ElevenLabs returned an iterator, concatenating chunks.")
+             audio_bytes = b"".join(chunk for chunk in audio_result)
+        elif isinstance(audio_result, bytes):
+             logger.info("ElevenLabs returned bytes directly.")
+             audio_bytes = audio_result
+        else:
+             logger.error(f"ElevenLabs returned unexpected type: {type(audio_result)}")
+             return None
+
 
         if not audio_bytes:
              logger.error("ElevenLabs audio generation returned empty bytes.")
