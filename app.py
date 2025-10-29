@@ -1,28 +1,325 @@
-# ... (other imports) ...
+import os
+import logging # <-- ADD THIS LINE
+import sys
+import pickle
+import base64
+from email.mime.text import MIMEText
+from flask import Flask, request, jsonify, redirect, session, url_for
+from twilio.twiml.voice_response import VoiceResponse
+from twilio.rest import Client as TwilioClient
+from openai import OpenAI
+from elevenlabs import Voice, VoiceSettings
+from elevenlabs.client import ElevenLabs
+import google.oauth2.credentials
+import google_auth_oauthlib.flow
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
+
+# --- Diagnostic Print ---
+try:
+    import openai
+    print(f"🔥 Axiom AI server starting with Python version: {sys.version}", flush=True)
+    print(f"🔥 Detected OpenAI version: {openai.__version__}", flush=True)
+except Exception as e:
+    print(f"Error importing or checking OpenAI version: {e}", flush=True)
+# --- End Diagnostic Print ---
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-logger.info("✅ Flask app object created.") # <-- ADD THIS LINE
+logger.info("✅ Flask app object created.")
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev_secret_key_replace_me")
 
-# ... (Google API Setup remains the same) ...
-# ... (Gmail Helper remains the same) ...
-# ... (OpenAI Setup remains the same) ...
-# ... (ElevenLabs Setup remains the same) ...
-# ... (Twilio Setup remains the same) ...
+# --- Google API Setup ---
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/documents',
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/presentations',
+    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/forms.body',
+    'openid', # NEW: Added for Google Sign-In
+    'https://www.googleapis.com/auth/userinfo.email', # NEW: Added for Google Sign-In
+    'https://www.googleapis.com/auth/userinfo.profile' # NEW: Added for Google Sign-In
+]
+TOKEN_PATH = 'token.pickle'
+CLIENT_SECRETS_FILE = 'credentials.json'
+google_creds = None
+
+def load_google_credentials():
+    global google_creds
+    creds = None
+    if os.path.exists(TOKEN_PATH):
+        try:
+            with open(TOKEN_PATH, 'rb') as token:
+                creds = pickle.load(token)
+            logger.info("Credentials loaded from token.pickle")
+        except Exception as e:
+            logger.error(f"Error loading token.pickle: {e}")
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                logger.info("Credentials refreshed successfully.")
+                with open(TOKEN_PATH, 'wb') as token:
+                    pickle.dump(creds, token)
+                google_creds = creds
+                return creds
+            except Exception as e:
+                logger.error(f"Failed to refresh credentials: {e}")
+                google_creds = None
+                return None
+        else:
+            logger.warning("No valid credentials found. Authorization required via /authorize_google")
+            google_creds = None
+            return None
+    google_creds = creds
+    return creds
+
+def get_google_service(service_name, version):
+    global google_creds
+    if not google_creds or not google_creds.valid:
+        load_google_credentials()
+        if not google_creds or not google_creds.valid:
+             logger.warning(f"Cannot get {service_name} service: Google credentials not loaded.")
+             return None
+    try:
+        service = build(service_name, version, credentials=google_creds)
+        logger.info(f"{service_name.capitalize()} service created successfully.")
+        return service
+    except HttpError as error:
+        logger.error(f"An API error occurred: {error}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to create Google service {service_name}: {e}")
+        return None
+
+try:
+    load_google_credentials()
+except Exception as e:
+    logger.error(f"Error loading Google credentials on startup: {e}")
+# --- End Google API Setup ---
+
+# --- Helper function for Gmail ---
+def create_message(sender, to, subject, message_text):
+  message = MIMEText(message_text)
+  message['to'] = to
+  message['from'] = sender
+  message['subject'] = subject
+  raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+  return {'raw': raw_message}
+
+# --- OpenAI Setup ---
+openai_api_key = os.environ.get("OPENAI_API_KEY")
+if not openai_api_key:
+    logger.error("OPENAI_API_KEY environment variable not found.")
+    openai_client = None
+else:
+    try:
+        openai_client = OpenAI(api_key=openai_api_key)
+        logger.info("OpenAI client initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI client: {e}")
+        openai_client = None
+# --- End OpenAI Setup ---
+
+# --- ElevenLabs Setup ---
+elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY")
+elevenlabs_voice_id = os.environ.get("ELEVENLABS_VOICE_ID")
+if not elevenlabs_api_key or not elevenlabs_voice_id:
+    logger.warning("ElevenLabs credentials not set. Audio generation will be disabled.")
+    elevenlabs_client = None
+else:
+    try:
+        elevenlabs_client = ElevenLabs(api_key=elevenlabs_api_key)
+        logger.info("ElevenLabs client initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize ElevenLabs client: {e}")
+        elevenlabs_client = None
+# --- End ElevenLabs Setup ---
+
+# --- Twilio Setup ---
+twilio_account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+twilio_auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+twilio_number = os.environ.get("TWILIO_NUMBER")
+if not all([twilio_account_sid, twilio_auth_token, twilio_number]):
+    logger.warning("Twilio credentials not fully set. Call functionality will be disabled.")
+    twilio_client = None
+else:
+    try:
+        twilio_client = TwilioClient(twilio_account_sid, twilio_auth_token)
+        logger.info("Twilio client initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize Twilio client: {e}")
+        twilio_client = None
+# --- End Twilio Setup ---
 
 
-logger.info("🏁 Registering Flask routes...") # <-- ADD THIS LINE
+logger.info("🏁 Registering Flask routes...")
 @app.route('/')
 def home():
     auth_status = "Google API Authorized" if google_creds and google_creds.valid else "Google API NOT Authorized (Visit /authorize_google)"
     return f"Axiom AI Server is running.<br>{auth_status}"
 
-# ... (Rest of the routes /authorize_google, /oauth2callback, /ask, etc. remain the same) ...
+@app.route('/authorize_google')
+def authorize_google():
+    try:
+        flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE, SCOPES)
+        render_url = os.environ.get("PUBLIC_BASE_URL")
+        if not render_url:
+            logger.error("PUBLIC_BASE_URL environment variable not set.")
+            return "Server configuration error: PUBLIC_BASE_URL not set.", 500
+        redirect_uri = render_url.replace("http://", "https://") + '/oauth2callback'
+        logger.info(f"Using redirect_uri: {redirect_uri}")
+        flow.redirect_uri = redirect_uri
+        authorization_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            prompt='consent'
+            )
+        session['state'] = state
+        logger.info(f"Redirecting user to Google for authorization: {authorization_url}")
+        return redirect(authorization_url)
+    except FileNotFoundError:
+        logger.error(f"'{CLIENT_SECRETS_FILE}' not found. Check secret file setup on Render.")
+        return f"Error: '{CLIENT_SECRETS_FILE}' not found.", 500
+    except Exception as e:
+        logger.error(f"Error starting Google authorization: {e}")
+        return f"Error initiating Google authorization: {e}", 500
+
+@app.route('/oauth2callback')
+def oauth2callback():
+    global google_creds
+    state = session.get('state')
+    if not state or state != request.args.get('state'):
+        logger.error("Authorization failed: State mismatch.")
+        return "Authorization failed: State mismatch.", 400
+    try:
+        flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE, SCOPES, state=state)
+        render_url = os.environ.get("PUBLIC_BASE_URL")
+        if not render_url:
+             logger.error("PUBLIC_BASE_URL environment variable not set during callback.")
+             return "Server configuration error: PUBLIC_BASE_URL not set.", 500
+        redirect_uri = render_url.replace("http://", "https://") + '/oauth2callback'
+        flow.redirect_uri = redirect_uri
+        logger.info(f"Callback using redirect_uri: {redirect_uri}")
+        authorization_response = request.url
+        if not authorization_response.startswith("https://"):
+            authorization_response = authorization_response.replace("http://", "https://", 1)
+        logger.info(f"Fetching token with response: {authorization_response}")
+        flow.fetch_token(authorization_response=authorization_response)
+        creds = flow.credentials
+        with open(TOKEN_PATH, 'wb') as token:
+            pickle.dump(creds, token)
+        google_creds = creds
+        logger.info("Authorization successful. Credentials saved to token.pickle.")
+        return redirect(url_for('home'))
+    except Exception as e:
+        logger.error(f"Error during Google authorization callback: {e}")
+        logger.exception("Detailed traceback:")
+        return f"Authorization failed: {e}", 500
+# --- End Google Auth Routes ---
+
+
+# --- UPDATED /ask ROUTE FOR MEMORY ---
+@app.route('/ask', methods=['POST'])
+def ask_axiom():
+    """
+    Handles general chat prompts from the Android app.
+    NOW supports conversation history (memory).
+    """
+    if not openai_client:
+        return jsonify({"error": "OpenAI client not initialized."}), 500
+
+    data = request.get_json()
+    history = data.get('history') # Get the list of messages
+    logger.info(f"Received history with {len(history)} messages.")
+
+    if not history:
+        return jsonify({"error": "No history provided."}), 400
+
+    # The last message in the list is the new prompt
+    latest_prompt = history[-1].get('content', '').lower()
+
+    # --- Check for simple commands (we can remove this later) ---
+    if latest_prompt.startswith("send email to"):
+        try:
+            # ... (email parsing logic) ...
+            parts = latest_prompt.split("subject")
+            to_part = parts[0].replace("send email to", "").strip()
+            subject_part = parts[1].split("body")[0].strip()
+            body_part = parts[1].split("body")[1].strip()
+            recipient = to_part
+            subject = subject_part
+            body = body_part
+            logger.info(f"Parsed email command: To={recipient}, Subject={subject}")
+            result = send_email_logic(recipient, subject, body)
+            audio_base64 = generate_audio_base64(result)
+            return jsonify({"response": result, "audio_base64": audio_base64})
+        except Exception as e:
+            logger.error(f"Failed to parse 'send email' prompt: {e}")
+            response_text = "Sorry, I couldn't understand the email details. Please use the 'Send Email' button in the Cyber Grid for that task."
+            audio_base64 = generate_audio_base64(response_text)
+            return jsonify({"response": response_text, "audio_base64": audio_base64})
+
+    # --- Fallback to general OpenAI chat ---
+    try:
+        # --- NEW AXIOM PERSONALITY ---
+        system_prompt = (
+            "You are Axiom, an advanced AI business assistant from the Axiom Corporation Ltd "
+            "in South Africa. You were created by Zander van Niekerk. Your user is interacting "
+            "with you through a custom native Android app."
+            "\n"
+            "Your tone is professional, capable, and helpful. You are not just a chatbot; "
+            "you are an agent that can perform tasks."
+            "\n"
+            "CRITICAL RULES:"
+            "1. NEVER mention that you are an OpenAI model, ChatGPT, or gpt-4o-mini."
+            "2. If asked about your origins, you must say you were created by Zander van Niekerk "
+            "at Axiom Corporation Ltd."
+            "3. If you are asked to do a task (email, call, calendar) but cannot understand "
+            "the prompt, you must guide the user to use the 'Cyber Grid' in the app "
+            "for specialized tasks."
+            "4. You MUST use the provided conversation history to answer questions about past messages."
+        )
+
+        # Build the message list for OpenAI
+        # We add our system prompt first, then the user's history
+        messages_for_openai = [{"role": "system", "content": system_prompt}]
+
+        # The history from the app is already in the correct format
+        # [ {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."} ]
+        messages_for_openai.extend(history)
+
+        logger.info(f"Sending {len(messages_for_openai)} total messages to OpenAI.")
+
+        completion = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages_for_openai # Pass the full history
+        )
+        response_text = completion.choices[0].message.content
+        logger.info(f"OpenAI response: {response_text}")
+
+        # --- Generate ElevenLabs Audio ---
+        audio_base64 = generate_audio_base64(response_text)
+        # --- End ElevenLabs ---
+
+        # Send both text and audio back
+        return jsonify({"response": response_text, "audio_base64": audio_base64})
+
+    except Exception as e:
+        logger.error(f"OpenAI chat or ElevenLabs audio failed: {e}")
+        return jsonify({"error": f"Failed to get response: {e}"}), 500
+# --- END OF UPDATED ROUTE ---
+
 
 # --- UPDATED audio generation function ---
 def generate_audio_base64(text: str) -> str | None:
@@ -43,7 +340,7 @@ def generate_audio_base64(text: str) -> str | None:
             ),
             model="eleven_multilingual_v2"
         )
-        
+
         # The generate function returns an iterator of chunks. We need to concatenate them.
         audio_bytes = b"".join(chunk for chunk in audio_bytes_iterator)
         # --- End Correction ---
@@ -56,14 +353,163 @@ def generate_audio_base64(text: str) -> str | None:
         audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
         logger.info("Audio generated and encoded successfully.")
         return audio_base64
-        
+
     except Exception as e:
         logger.error(f"ElevenLabs audio generation failed: {e}")
         logger.exception("Detailed traceback:") # Add detailed traceback
         return None
 # --- END OF UPDATED FUNCTION ---
 
-# ... (rest of the code remains the same) ...
+
+@app.route('/incoming_call', methods=['POST'])
+def handle_incoming_call():
+    """Handles incoming calls via Twilio."""
+    response = VoiceResponse()
+    response.say("Hello, you have reached Axiom AI. How can I help you today?")
+    # TODO: Add <Gather> to make this interactive
+    response.hangup()
+    return str(response)
+
+# --- Twilio Call Logic Routes ---
+@app.route('/make_call', methods=['POST'])
+def make_call_route():
+    if not twilio_client:
+        logger.error("Make call failed: Twilio client not initialized.")
+        return jsonify({"error": "Twilio client not initialized."}), 500
+
+    data = request.get_json()
+    phone_number = data.get('phone_number')
+    instructions = data.get('instructions')
+
+    if not phone_number or not instructions:
+        logger.error(f"Make call failed: Missing phone_number or instructions. Got: {data}")
+        return jsonify({"error": "Missing 'phone_number' or 'instructions'."}), 400
+
+    status = make_call_logic(phone_number, instructions)
+
+    if "Error" in status:
+        return jsonify({"error": status}), 500
+
+    # NEW: Generate audio for the confirmation response
+    audio_base64 = generate_audio_base64(status)
+    return jsonify({"status": "success", "message": status, "audio_base64": audio_base64})
+
+def make_call_logic(phone_number, instructions):
+    """Helper function that contains the logic to initiate a Twilio call."""
+    if not twilio_client:
+        return "Error: Twilio is not configured on the server."
+
+    try:
+        public_url = os.environ.get("PUBLIC_BASE_URL")
+        if not public_url:
+            logger.error("make_call_logic failed: PUBLIC_BASE_URL is not set.")
+            return "Error: PUBLIC_BASE_URL is not set on the server."
+
+        encoded_instructions = base64.urlsafe_b64encode(instructions.encode('utf-8')).decode('utf-8')
+        twiml_url = f"{public_url}/handle_call?instructions={encoded_instructions}"
+
+        logger.info(f"Initiating call to {phone_number} with TwiML URL: {twiml_url}")
+
+        call = twilio_client.calls.create(
+            to=phone_number,
+            from_=twilio_number,
+            url=twiml_url
+        )
+
+        logger.info(f"Call initiated with SID: {call.sid}")
+        return f"Call initiated to {phone_number}." # Shorter, better for TTS
+
+    except Exception as e:
+        logger.error(f"Twilio call failed: {e}")
+        if "is not valid" in str(e):
+             return f"Error: The phone number '{phone_number}' is not valid. Please check the number and include the country code."
+        return f"Error initiating call: {e}"
+
+@app.route('/handle_call', methods=['POST'])
+def handle_call():
+    """Called *by Twilio* to get TwiML instructions."""
+    response = VoiceResponse()
+    encoded_instructions = request.args.get('instructions')
+
+    if encoded_instructions:
+        try:
+            instructions = base64.urlsafe_b64decode(encoded_instructions).decode('utf-8')
+            logger.info(f"Handling call, speaking instructions: {instructions}")
+            response.say(instructions)
+            # We could use ElevenLabs here, but it requires generating an MP3,
+            # hosting it publicly, and using <Play> instead of <Say>.
+            # We'll stick with the standard Twilio voice for calls for now.
+        except Exception as e:
+            logger.error(f"Error decoding instructions for call: {e}")
+            response.say("Sorry, I had an error reading my instructions.")
+    else:
+        logger.warning("Handling call, but no instructions were provided.")
+        response.say("Hello, this is Axiom AI. I was not given a message to relay.")
+
+    response.hangup()
+    return str(response)
+# --- End Twilio Call Logic ---
+
+
+# --- Placeholder for Gmail Logic ---
+def send_email_logic(to, subject, body):
+    gmail_service = get_google_service('gmail', 'v1')
+    if not gmail_service:
+        return "Error: Could not access Gmail. Please ensure Google API is authorized."
+    try:
+        user_profile = gmail_service.users().getProfile(userId='me').execute()
+        sender_email = user_profile['emailAddress']
+        if not sender_email:
+             return "Error: Could not determine sender email address."
+        message_body = create_message(sender_email, to, subject, body)
+        message = (gmail_service.users().messages().send(userId='me', body=message_body)
+                   .execute())
+        logger.info(f"Message Id: {message['id']} sent successfully.")
+        return f"OK, I've sent the email to {to}." # Shorter, better for TTS
+    except HttpError as error:
+        logger.error(f'An API error occurred while sending email: {error}')
+        return f"Error sending email: {error}"
+    except Exception as e:
+        logger.error(f'An unexpected error occurred while sending email: {e}')
+        return f"Sorry, an unexpected error occurred: {e}"
+# --- End Gmail Logic ---
+
+
+# --- Placeholder routes for other skills ---
+@app.route('/create_doc', methods=['POST'])
+def create_doc_route():
+    # ... (logic remains same)
+    docs_service = get_google_service('docs', 'v1')
+    if not docs_service:
+        return jsonify({"error": "Google API not authorized."}), 401
+    return jsonify({"status": "Document creation not implemented yet."}), 501
+
+@app.route('/generate_title', methods=['POST'])
+def generate_title():
+    if not openai_client:
+        return jsonify({"error": "OpenAI client not initialized."}), 500
+    data = request.get_json()
+    user_message = data.get('user_message')
+    axiom_message = data.get('axiom_message')
+    if not user_message or not axiom_message:
+        return jsonify({"error": "Missing messages for title generation."}), 400
+    try:
+        prompt = f"Create a very short, concise chat title (4-5 words maximum) for this conversation:\n\nUser: \"{user_message}\"\nAssistant: \"{axiom_message}\""
+        completion = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a title generator. You only respond with a short title."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        title = completion.choices[0].message.content.strip().replace("\"", "")
+        logger.info(f"Generated title: {title}")
+        return jsonify({"title": title})
+    except Exception as e:
+        logger.error(f"Title generation failed: {e}")
+        return jsonify({"error": f"Failed to generate title: {e}"}), 500
+# --- End Placeholder routes ---
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
