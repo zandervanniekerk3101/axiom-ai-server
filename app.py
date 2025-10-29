@@ -228,28 +228,31 @@ def oauth2callback():
 # --- End Google Auth Routes ---
 
 
+# --- UPDATED /ask ROUTE FOR MEMORY ---
 @app.route('/ask', methods=['POST'])
 def ask_axiom():
     """
     Handles general chat prompts from the Android app.
-    NEW: Now generates ElevenLabs audio and sends it back.
+    NOW supports conversation history (memory).
     """
     if not openai_client:
         return jsonify({"error": "OpenAI client not initialized."}), 500
 
     data = request.get_json()
-    prompt = data.get('prompt')
-    logger.info(f"Received prompt from app: {prompt}")
+    history = data.get('history') # Get the list of messages
+    logger.info(f"Received history with {len(history)} messages.")
 
-    if not prompt:
-        return jsonify({"error": "No prompt provided."}), 400
+    if not history:
+        return jsonify({"error": "No history provided."}), 400
+        
+    # The last message in the list is the new prompt
+    latest_prompt = history[-1].get('content', '').lower()
 
-    # --- Check for commands first ---
-    # (We'll keep the simple keyword parsing for now)
-    if prompt.lower().startswith("send email to"):
+    # --- Check for simple commands (we can remove this later) ---
+    if latest_prompt.startswith("send email to"):
         try:
             # ... (email parsing logic) ...
-            parts = prompt.split("subject")
+            parts = latest_prompt.split("subject")
             to_part = parts[0].replace("send email to", "").strip()
             subject_part = parts[1].split("body")[0].strip()
             body_part = parts[1].split("body")[1].strip()
@@ -258,12 +261,11 @@ def ask_axiom():
             body = body_part
             logger.info(f"Parsed email command: To={recipient}, Subject={subject}")
             result = send_email_logic(recipient, subject, body)
-            # Generate audio for the confirmation message
             audio_base64 = generate_audio_base64(result)
             return jsonify({"response": result, "audio_base64": audio_base64})
         except Exception as e:
             logger.error(f"Failed to parse 'send email' prompt: {e}")
-            response_text = "Sorry, I couldn't understand the email details. Please use the format: 'send email to [email] subject [subject] body [message]'."
+            response_text = "Sorry, I couldn't understand the email details. Please use the 'Send Email' button in the Cyber Grid for that task."
             audio_base64 = generate_audio_base64(response_text)
             return jsonify({"response": response_text, "audio_base64": audio_base64})
 
@@ -285,20 +287,27 @@ def ask_axiom():
             "3. If you are asked to do a task (email, call, calendar) but cannot understand "
             "the prompt, you must guide the user to use the 'Cyber Grid' in the app "
             "for specialized tasks."
+            "4. You MUST use the provided conversation history to answer questions about past messages."
         )
+        
+        # Build the message list for OpenAI
+        # We add our system prompt first, then the user's history
+        messages_for_openai = [{"role": "system", "content": system_prompt}]
+        
+        # The history from the app is already in the correct format
+        # [ {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."} ]
+        messages_for_openai.extend(history) 
+        
+        logger.info(f"Sending {len(messages_for_openai)} total messages to OpenAI.")
 
         completion = openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ]
+            messages=messages_for_openai # Pass the full history
         )
-        # --- END OF NEW BLOCK ---
         response_text = completion.choices[0].message.content
         logger.info(f"OpenAI response: {response_text}")
 
-        # --- NEW: Generate ElevenLabs Audio ---
+        # --- Generate ElevenLabs Audio ---
         audio_base64 = generate_audio_base64(response_text)
         # --- End ElevenLabs ---
 
@@ -308,6 +317,8 @@ def ask_axiom():
     except Exception as e:
         logger.error(f"OpenAI chat or ElevenLabs audio failed: {e}")
         return jsonify({"error": f"Failed to get response: {e}"}), 500
+# --- END OF UPDATED ROUTE ---
+
 
 def generate_audio_base64(text: str) -> str | None:
     """Helper function to generate audio and return it as a Base64 string."""
@@ -335,7 +346,7 @@ def generate_audio_base64(text: str) -> str | None:
         logger.error(f"ElevenLabs audio generation failed: {e}")
         return None
 
-# ... (Twilio Call Logic Routes /make_call, /handle_call, etc. remain the same) ...
+# ... (Twilio Call Logic Routes /make_call, /handle_call, etc. remain exactly the same) ...
 # ... (Gmail Logic send_email_logic remains the same) ...
 # ... (Placeholder routes /create_doc, /generate_title remain the same) ...
 
